@@ -1,38 +1,80 @@
 # stack — lo que corre en el VPS
 
-`compose.yaml` define el stack de demo: `cloudflared` + `traefik` + `landing`.
+`compose.yaml` agrega `traefik` + `landing` y los conecta al **cloudflared que ya
+tenés corriendo** (túnel DW-Services) a través de una red de docker compartida.
 
-**No publica ningún puerto.** `cloudflared` sale hacia Cloudflare; Traefik solo
-es alcanzable dentro de la red `edge`. El firewall del VPS puede quedar cerrado a
-todo lo entrante.
+**No levanta otro cloudflared** y **no publica ningún puerto.** Traefik solo es
+alcanzable dentro de la red `edge`; el cloudflared existente lo alcanza por su
+nombre de contenedor.
 
-## Antes de levantar
+## Paso 1 — Red compartida `edge`
 
-1. Creá el túnel y sus credenciales: ver **[cloudflared/README.md](cloudflared/README.md)**.
-   Tenés que quedar con `cloudflared/config.yml` (con el UUID) y
-   `cloudflared/creds.json` en su lugar.
-2. Creá el CNAME en Cloudflare (a mano) apuntando al túnel.
-
-## Levantar
+El cloudflared existente y este stack tienen que estar en la misma red de docker.
+Creá una red externa una sola vez:
 
 ```sh
-cp .env.example .env          # editá LANDING_HOST y LANDING_IMAGE
-docker compose up -d
-docker compose ps             # cloudflared, traefik y landing arriba
-docker compose logs -f cloudflared   # "Registered tunnel connection" = OK
+docker network create edge
 ```
 
-## Cómo fluye un request
+Y conectá tu **cloudflared existente** a ella. En el compose donde vive tu
+cloudflared, agregá la red:
 
-1. Cloudflare recibe el HTTPS y lo manda por el túnel a `cloudflared`.
-2. `cloudflared` reenvía **todo** a `http://traefik:80` (catch-all del `config.yml`).
-3. Traefik mira el `Host` y lo rutea al contenedor con el label
-   `Host(\`demo.itier.pymesenlinea.com.ar\`)` → `landing`.
+```yaml
+services:
+  cloudflared:
+    networks: [ <tu-red-actual>, edge ]   # sumá `edge` a las que ya tenga
+networks:
+  edge:
+    external: true
+```
+
+Recreá ese contenedor (`docker compose up -d`). Para una prueba rápida sin editar
+nada, podés conectarlo en caliente (se pierde al recrear):
+
+```sh
+docker network connect edge <nombre-del-contenedor-cloudflared>
+```
+
+## Paso 2 — Public Hostname en el túnel (dashboard)
+
+En Cloudflare → **Networks → Tunnels → DW-Services → Published application routes**
+(o "Public Hostname"), agregá:
+
+| Campo | Valor |
+|---|---|
+| Subdomain | `demo` |
+| Domain | `itier.pymesenlinea.com.ar` |
+| Service | `HTTP` · `itier-traefik:80` |
+
+Cloudflare crea el DNS solo. La request llega a Traefik con el Host original, y
+Traefik la rutea a la landing por el label `Host(...)`.
+
+## Paso 3 — Levantar
+
+```sh
+cp .env.example .env          # editá LANDING_HOST (= al Public Hostname) y LANDING_IMAGE
+docker compose up -d
+docker compose ps             # traefik y landing arriba
+```
+
+## Verificar
+
+```sh
+curl -I https://demo.itier.pymesenlinea.com.ar        # HTTP/2 200
+# desde el cloudflared, que resuelva Traefik:
+docker exec <cloudflared> wget -qO- http://itier-traefik:80/healthz   # ok
+```
+
+## Agregar más servicios
+
+1. Sumá el servicio a `compose.yaml` en la red `edge` con sus labels de Traefik
+   (`Host(\`otro.tudominio\`)`).
+2. En el túnel, agregá otro Public Hostname → el mismo `http://itier-traefik:80`.
+3. `docker compose up -d`.
 
 ## Notas de seguridad
 
-- **`docker.sock` en Traefik es read-only.** Para endurecer más, se puede
-  interponer un [socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)
-  que exponga solo la API que Traefik necesita.
-- `creds.json` es secreto (gitignored). El único proceso con salida es
-  `cloudflared`, y no acepta conexiones entrantes.
+- **`docker.sock` en Traefik es read-only.** Para endurecer, se puede interponer
+  un [socket-proxy](https://github.com/Tecnativa/docker-socket-proxy).
+- Ningún puerto se publica al host: el único proceso con salida es el cloudflared
+  existente, y no acepta conexiones entrantes.

@@ -8,13 +8,14 @@ abren puertos ni se instalan certificados en el servidor — `cloudflared` sale
 hacia Cloudflare y nadie entra al VPS desde internet.
 
 ```
-internet ──HTTPS──> Cloudflare (termina TLS) ──túnel cifrado──> cloudflared
-                                                                   │ http (red docker)
-                                                                Traefik ──> servicios
+internet ──HTTPS──> Cloudflare (termina TLS) ──túnel──> cloudflared (ya existe)
+                                                            │ red docker `edge`
+                                                         Traefik ──> servicios
 ```
 
-Sin Pulumi ni ninguna herramienta de IaC: el túnel se define con un `config.yml`
-versionado, y **los registros DNS los creás vos a mano** en el panel de Cloudflare.
+Reusa el túnel **DW-Services** que ya tenés (gestionado desde el dashboard) y su
+connector `cloudflared`, que ya corre como contenedor en el VPS. Este repo solo
+agrega el reverse proxy y los servicios, y los conecta al cloudflared existente.
 
 ## Este repo contiene un demo end-to-end
 
@@ -25,11 +26,9 @@ antes de mover el stack pesado de GLPI/Zabbix.
 ```
 infra/
 ├── stack/                       Lo que corre en el VPS
-│   ├── compose.yaml             cloudflared + traefik + landing (sin puertos)
+│   ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
 │   ├── .env.example
-│   └── cloudflared/
-│       ├── config.yml           ingress del túnel (todo → Traefik)
-│       └── README.md            crear el túnel + credenciales + DNS
+│   └── README.md                red compartida + Public Hostname + levantar
 └── examples/itier-landing-ci/   Archivos para COPIAR al repo itier
     ├── Dockerfile               empaqueta la landing en nginx
     ├── nginx.conf               headers de seguridad + /healthz
@@ -40,19 +39,23 @@ infra/
 
 | Pieza | Quién la maneja | Dónde vive |
 |---|---|---|
-| Ingress del túnel | archivo versionado | `stack/cloudflared/config.yml` |
-| Registros DNS | **vos, a mano** | panel de Cloudflare |
-| Contenedores en el VPS | **docker compose** | `stack/compose.yaml` |
+| Túnel + connector | **ya existe** (DW-Services) | tu VPS + dashboard |
+| Public Hostname (ingress) | dashboard del túnel | Cloudflare |
+| DNS | lo crea el dashboard al agregar el hostname | Cloudflare |
+| Reverse proxy + servicios | **docker compose** | `stack/compose.yaml` |
 | Imagen de la landing | **GitHub Actions → GHCR** | `examples/` → repo `itier` |
 | SSL público | **Cloudflare** (Universal SSL) | nada que instalar |
+
+El punto de integración es una **red de docker compartida (`edge`)**: el cloudflared
+existente y el Traefik de este stack se unen a ella para verse entre sí.
 
 ---
 
 ## Puesta en marcha del demo
 
 ### Requisitos previos
-- Una cuenta de Cloudflare con la zona `pymesenlinea.com.ar`.
-- Un VPS con Docker Engine + docker-compose.
+- El túnel DW-Services activo (ya lo tenés) con su `cloudflared` corriendo como
+  contenedor en el VPS.
 - El repo `infra` clonado en el VPS (o al menos la carpeta `stack/`).
 
 ### Paso 1 — Publicar la imagen de la landing (en el repo `itier`)
@@ -66,48 +69,54 @@ cp examples/itier-landing-ci/deploy-landing.yml \
    <itier>/.github/workflows/deploy-landing.yml
 ```
 
-Commiteá y pusheá a `main`. GitHub Actions construye y publica
+Commiteá y pusheá a `main`. GitHub Actions publica
 `ghcr.io/pel-matiasvaldivia/itier-landing:latest`. Marcá el paquete como
 **público** (o dale acceso al VPS) para que el `docker pull` funcione.
 
 > La imagen se puede probar sin nada de Cloudflare:
 > `docker build -t itier-landing landing/ && docker run --rm -p 8080:80 itier-landing`
-> y abrís `http://localhost:8080`.
 
-### Paso 2 — Crear el túnel y el DNS
+### Paso 2 — Conectar el cloudflared existente a la red `edge`
 
-Seguí **[stack/cloudflared/README.md](stack/cloudflared/README.md)**. En resumen:
+```sh
+docker network create edge
+```
 
-1. `cloudflared tunnel login` + `tunnel create itier-demo` (desde la imagen de
-   docker, no hace falta instalar nada) → te da el **UUID** y `creds.json`.
-2. Poné el UUID en `stack/cloudflared/config.yml` y dejá `creds.json` en esa
-   carpeta (queda gitignored).
-3. En Cloudflare → DNS, creá el CNAME a mano:
-   `demo.itier` → `<UUID>.cfargotunnel.com`, **Proxied** (nube naranja).
+Sumá `edge` a tu contenedor cloudflared (ver **[stack/README.md](stack/README.md)**
+para el snippet del compose). En una línea, para probar ya:
 
-### Paso 3 — Levantar el stack en el VPS
+```sh
+docker network connect edge <nombre-del-contenedor-cloudflared>
+```
+
+### Paso 3 — Agregar el Public Hostname en el túnel
+
+En Cloudflare → Networks → Tunnels → **DW-Services** → Published application routes,
+agregá: `demo.itier.pymesenlinea.com.ar` → Service `HTTP` `itier-traefik:80`.
+El DNS lo crea el dashboard solo.
+
+### Paso 4 — Levantar el stack
 
 ```sh
 cd stack
-cp .env.example .env          # editá LANDING_HOST y LANDING_IMAGE
+cp .env.example .env          # LANDING_HOST = el hostname del paso 3
 docker compose up -d
-docker compose ps             # cloudflared, traefik y landing arriba
 ```
 
-### Paso 4 — Verificar
+### Paso 5 — Verificar
 
 ```sh
-curl -I https://demo.itier.pymesenlinea.com.ar
+curl -I https://demo.itier.pymesenlinea.com.ar        # HTTP/2 200
 ```
 
-Deberías ver `HTTP/2 200` servido a través de Cloudflare. En el VPS,
-`docker compose ps` muestra los tres servicios arriba y **ningún puerto publicado**.
+En el VPS, `docker compose ps` muestra `traefik` y `landing` arriba y **ningún
+puerto publicado**.
 
 ---
 
 ## Despliegue continuo
 
-Una vez enganchado, cada push a `main` en `itier` que toque `landing/`:
+Cada push a `main` en `itier` que toque `landing/`:
 
 1. GitHub Actions construye la imagen y la publica en GHCR.
 2. Si cargaste los secrets `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` en el repo,
@@ -115,19 +124,9 @@ Una vez enganchado, cada push a `main` en `itier` que toque `landing/`:
 
 El VPS nunca compila: solo baja imágenes ya construidas.
 
-## Agregar más servicios
-
-1. Sumá el servicio a `stack/compose.yaml` con sus labels de Traefik
-   (`Host(\`otro.tudominio\`)`).
-2. Creá **otro CNAME** en Cloudflare → el mismo `<UUID>.cfargotunnel.com`.
-3. `docker compose up -d`.
-
-El `config.yml` del túnel no se toca: es catch-all hacia Traefik, y Traefik
-hace todo el ruteo por Host.
-
 ## Migrar el stack real (GLPI/Zabbix)
 
 El repo `itier` ya tiene `deploy/vps/docker-compose.yml` pensado para NPM. Para
 moverlo a esta arquitectura: quitá los `ports:` publicados, poné los frontends
 (GLPI, Zabbix web) en la red `edge`, agregales labels de Traefik, y creá sus
-CNAME. El SSL deja de necesitar Let's Encrypt.
+Public Hostname en el túnel. El SSL deja de necesitar Let's Encrypt.

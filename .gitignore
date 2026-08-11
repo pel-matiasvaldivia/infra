@@ -4,8 +4,3 @@
 *.key
 id_*
 !*.example
-
-# Credenciales del túnel (el config.yml sí se commitea; las creds no).
-stack/cloudflared/creds.json
-stack/cloudflared/*.json
-stack/cloudflared/cert.pem
