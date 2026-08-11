@@ -1,8 +1,3 @@
-# Node / Pulumi
-node_modules/
-bin/
-*.tsbuildinfo
-
 # Secretos y estado local — nunca commitear
 .env
 *.pem
@@ -10,5 +5,7 @@ bin/
 id_*
 !*.example
 
-# Pulumi solo commitea Pulumi.<stack>.yaml (los secretos van cifrados).
-Pulumi.*.yaml.bak
+# Credenciales del túnel (el config.yml sí se commitea; las creds no).
+stack/cloudflared/creds.json
+stack/cloudflared/*.json
+stack/cloudflared/cert.pem

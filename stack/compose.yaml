@@ -9,10 +9,13 @@
 # Traefik sólo es alcanzable dentro de la red `edge`. El firewall del VPS puede
 # quedar cerrado a todo lo entrante.
 #
+# El túnel es gestionado localmente: su config vive en ./cloudflared/config.yml
+# y sus credenciales en ./cloudflared/creds.json (ver cloudflared/README.md).
+# No hace falta ningún token.
+#
 # Variables (ver .env.example):
-#   TUNNEL_TOKEN   token del connector (lo genera Pulumi; es secreto)
 #   LANDING_IMAGE  imagen de la landing en GHCR
-#   LANDING_HOST   hostname público (debe coincidir con el ingress del túnel)
+#   LANDING_HOST   hostname público (el CNAME lo creás vos en Cloudflare)
 
 name: itier-demo
 
@@ -30,9 +33,11 @@ services:
     <<: *comun
     image: cloudflare/cloudflared:latest
     container_name: itier-cloudflared
-    command: tunnel --no-autoupdate run
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?falta TUNNEL_TOKEN (lo genera Pulumi)}
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      # Config del túnel (versionada) + credenciales (secreto, gitignored).
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./cloudflared/creds.json:/etc/cloudflared/creds.json:ro
     networks: [edge]
 
   # ── Reverse proxy interno. Rutea por labels de Docker. SIN TLS (lo hizo CF) ──

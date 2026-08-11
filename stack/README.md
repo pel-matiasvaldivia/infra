@@ -6,24 +6,26 @@
 es alcanzable dentro de la red `edge`. El firewall del VPS puede quedar cerrado a
 todo lo entrante.
 
-## Uso manual
+## Antes de levantar
+
+1. Creá el túnel y sus credenciales: ver **[cloudflared/README.md](cloudflared/README.md)**.
+   Tenés que quedar con `cloudflared/config.yml` (con el UUID) y
+   `cloudflared/creds.json` en su lugar.
+2. Creá el CNAME en Cloudflare (a mano) apuntando al túnel.
+
+## Levantar
 
 ```sh
-mkdir -p /opt/itier-demo && cd /opt/itier-demo
-# copiá compose.yaml acá y creá el .env (ver .env.example)
-cp /ruta/a/infra/stack/compose.yaml .
-cp /ruta/a/infra/stack/.env.example .env
-# editá .env: TUNNEL_TOKEN (output de Pulumi), LANDING_HOST, LANDING_IMAGE
-docker compose --env-file .env up -d
-docker compose ps          # cloudflared, traefik y landing arriba
+cp .env.example .env          # editá LANDING_HOST y LANDING_IMAGE
+docker compose up -d
+docker compose ps             # cloudflared, traefik y landing arriba
+docker compose logs -f cloudflared   # "Registered tunnel connection" = OK
 ```
-
-O dejá que Pulumi copie y levante todo por SSH: ver `deployToVps` en `../pulumi`.
 
 ## Cómo fluye un request
 
 1. Cloudflare recibe el HTTPS y lo manda por el túnel a `cloudflared`.
-2. `cloudflared` lo entrega a `http://traefik:80` (según el ingress del túnel).
+2. `cloudflared` reenvía **todo** a `http://traefik:80` (catch-all del `config.yml`).
 3. Traefik mira el `Host` y lo rutea al contenedor con el label
    `Host(\`demo.itier.pymesenlinea.com.ar\`)` → `landing`.
 
@@ -32,5 +34,5 @@ O dejá que Pulumi copie y levante todo por SSH: ver `deployToVps` en `../pulumi
 - **`docker.sock` en Traefik es read-only.** Para endurecer más, se puede
   interponer un [socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)
   que exponga solo la API que Traefik necesita.
-- Los frontends nunca ven internet directo: el único proceso con salida es
+- `creds.json` es secreto (gitignored). El único proceso con salida es
   `cloudflared`, y no acepta conexiones entrantes.

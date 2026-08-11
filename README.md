@@ -1,8 +1,7 @@
 # infra — despliegue de iTier detrás de Cloudflare Tunnel
 
 Automatiza el despliegue de los servicios de iTier en un VPS que solo tiene
-**Docker Engine + docker-compose**, detrás de un **Cloudflare Tunnel**, con
-**Pulumi** manejando la parte de Cloudflare.
+**Docker Engine + docker-compose**, detrás de un **Cloudflare Tunnel**.
 
 La idea central: **el SSL lo termina Cloudflare, no el VPS.** Con el túnel no se
 abren puertos ni se instalan certificados en el servidor — `cloudflared` sale
@@ -14,6 +13,9 @@ internet ──HTTPS──> Cloudflare (termina TLS) ──túnel cifrado──>
                                                                 Traefik ──> servicios
 ```
 
+Sin Pulumi ni ninguna herramienta de IaC: el túnel se define con un `config.yml`
+versionado, y **los registros DNS los creás vos a mano** en el panel de Cloudflare.
+
 ## Este repo contiene un demo end-to-end
 
 Despliega la **landing de iTier** (sitio estático) en `demo.itier.pymesenlinea.com.ar`.
@@ -22,24 +24,24 @@ antes de mover el stack pesado de GLPI/Zabbix.
 
 ```
 infra/
-├── pulumi/                     Proyecto Pulumi (TypeScript)
-│   ├── index.ts                túnel + ingress + DNS + deploy remoto opcional
-│   ├── Pulumi.yaml             proyecto y config con defaults
-│   └── Pulumi.demo.yaml        stack "demo"
-├── stack/                      Lo que corre en el VPS
-│   ├── compose.yaml            cloudflared + traefik + landing (sin puertos)
-│   └── .env.example
-└── examples/itier-landing-ci/  Archivos para COPIAR al repo itier
-    ├── Dockerfile              empaqueta la landing en nginx
-    ├── nginx.conf              headers de seguridad + /healthz
-    └── deploy-landing.yml      GitHub Actions: build → GHCR → deploy por SSH
+├── stack/                       Lo que corre en el VPS
+│   ├── compose.yaml             cloudflared + traefik + landing (sin puertos)
+│   ├── .env.example
+│   └── cloudflared/
+│       ├── config.yml           ingress del túnel (todo → Traefik)
+│       └── README.md            crear el túnel + credenciales + DNS
+└── examples/itier-landing-ci/   Archivos para COPIAR al repo itier
+    ├── Dockerfile               empaqueta la landing en nginx
+    ├── nginx.conf               headers de seguridad + /healthz
+    └── deploy-landing.yml       GitHub Actions: build → GHCR → deploy por SSH
 ```
 
 ## Cómo encaja cada pieza
 
 | Pieza | Quién la maneja | Dónde vive |
 |---|---|---|
-| Túnel, ingress, DNS | **Pulumi** (API de Cloudflare) | `pulumi/` |
+| Ingress del túnel | archivo versionado | `stack/cloudflared/config.yml` |
+| Registros DNS | **vos, a mano** | panel de Cloudflare |
 | Contenedores en el VPS | **docker compose** | `stack/compose.yaml` |
 | Imagen de la landing | **GitHub Actions → GHCR** | `examples/` → repo `itier` |
 | SSL público | **Cloudflare** (Universal SSL) | nada que instalar |
@@ -49,12 +51,9 @@ infra/
 ## Puesta en marcha del demo
 
 ### Requisitos previos
-- Una cuenta de Cloudflare con la zona `pymesenlinea.com.ar` (tenés a mano el
-  **Account ID** y el **Zone ID**).
-- Un **API Token** de Cloudflare con permisos: `Account:Cloudflare Tunnel:Edit`,
-  `Zone:DNS:Edit`.
-- Un VPS con Docker Engine + docker-compose y acceso SSH.
-- [Pulumi CLI](https://www.pulumi.com/docs/install/) y Node.js 20+.
+- Una cuenta de Cloudflare con la zona `pymesenlinea.com.ar`.
+- Un VPS con Docker Engine + docker-compose.
+- El repo `infra` clonado en el VPS (o al menos la carpeta `stack/`).
 
 ### Paso 1 — Publicar la imagen de la landing (en el repo `itier`)
 
@@ -71,60 +70,28 @@ Commiteá y pusheá a `main`. GitHub Actions construye y publica
 `ghcr.io/pel-matiasvaldivia/itier-landing:latest`. Marcá el paquete como
 **público** (o dale acceso al VPS) para que el `docker pull` funcione.
 
-> Detalle: la imagen se puede probar localmente sin nada de Cloudflare:
+> La imagen se puede probar sin nada de Cloudflare:
 > `docker build -t itier-landing landing/ && docker run --rm -p 8080:80 itier-landing`
 > y abrís `http://localhost:8080`.
 
-### Paso 2 — Provisionar Cloudflare con Pulumi
+### Paso 2 — Crear el túnel y el DNS
 
-```sh
-cd pulumi
-npm install
-pulumi stack init demo                       # o `pulumi stack select demo`
+Seguí **[stack/cloudflared/README.md](stack/cloudflared/README.md)**. En resumen:
 
-# Config (editá Pulumi.demo.yaml con tus IDs o usá estos comandos):
-pulumi config set accountId  <tu-account-id>
-pulumi config set zoneId     <tu-zone-id>
-pulumi config set hostname   demo.itier.pymesenlinea.com.ar
-
-# Secreto: el API token de Cloudflare
-export CLOUDFLARE_API_TOKEN=<tu-token>        # o: pulumi config set --secret cloudflare:apiToken <token>
-
-pulumi up
-```
-
-Esto crea el túnel, el ingress (`hostname → traefik:80`), el CNAME proxied, y
-te deja el **token del connector** como output:
-
-```sh
-pulumi stack output tunnelTokenOut --show-secrets
-```
+1. `cloudflared tunnel login` + `tunnel create itier-demo` (desde la imagen de
+   docker, no hace falta instalar nada) → te da el **UUID** y `creds.json`.
+2. Poné el UUID en `stack/cloudflared/config.yml` y dejá `creds.json` en esa
+   carpeta (queda gitignored).
+3. En Cloudflare → DNS, creá el CNAME a mano:
+   `demo.itier` → `<UUID>.cfargotunnel.com`, **Proxied** (nube naranja).
 
 ### Paso 3 — Levantar el stack en el VPS
 
-**Opción A — a mano** (control total):
-
 ```sh
-# en el VPS
-mkdir -p /opt/itier-demo && cd /opt/itier-demo
-# copiá stack/compose.yaml a este directorio, y creá .env:
-cat > .env <<EOF
-TUNNEL_TOKEN=<el-token-del-paso-2>
-LANDING_IMAGE=ghcr.io/pel-matiasvaldivia/itier-landing:latest
-LANDING_HOST=demo.itier.pymesenlinea.com.ar
-EOF
-docker compose --env-file .env up -d
-```
-
-**Opción B — que lo haga Pulumi** (un solo `pulumi up` para todo):
-
-```sh
-cd pulumi
-pulumi config set deployToVps true
-pulumi config set vpsHost <ip-del-vps>
-pulumi config set vpsUser deploy
-pulumi config set --secret vpsSshKey -- "$(cat ~/.ssh/id_demo)"
-pulumi up      # ahora también copia el compose y corre docker compose up
+cd stack
+cp .env.example .env          # editá LANDING_HOST y LANDING_IMAGE
+docker compose up -d
+docker compose ps             # cloudflared, traefik y landing arriba
 ```
 
 ### Paso 4 — Verificar
@@ -134,8 +101,7 @@ curl -I https://demo.itier.pymesenlinea.com.ar
 ```
 
 Deberías ver `HTTP/2 200` servido a través de Cloudflare. En el VPS,
-`docker compose ps` muestra `cloudflared`, `traefik` y `landing` arriba, y
-**ningún puerto publicado**.
+`docker compose ps` muestra los tres servicios arriba y **ningún puerto publicado**.
 
 ---
 
@@ -151,13 +117,17 @@ El VPS nunca compila: solo baja imágenes ya construidas.
 
 ## Agregar más servicios
 
-Para sumar otro servicio detrás del mismo túnel: agregalo a `stack/compose.yaml`
-con sus labels de Traefik (`Host(...)`) y agregá su hostname al ingress del túnel
-en `pulumi/index.ts`. `pulumi up` + `docker compose up -d` y listo.
+1. Sumá el servicio a `stack/compose.yaml` con sus labels de Traefik
+   (`Host(\`otro.tudominio\`)`).
+2. Creá **otro CNAME** en Cloudflare → el mismo `<UUID>.cfargotunnel.com`.
+3. `docker compose up -d`.
+
+El `config.yml` del túnel no se toca: es catch-all hacia Traefik, y Traefik
+hace todo el ruteo por Host.
 
 ## Migrar el stack real (GLPI/Zabbix)
 
 El repo `itier` ya tiene `deploy/vps/docker-compose.yml` pensado para NPM. Para
 moverlo a esta arquitectura: quitá los `ports:` publicados, poné los frontends
-(GLPI, Zabbix web) en la red `edge`, agregales labels de Traefik, y sumá sus
-hostnames al ingress del túnel. El SSL deja de necesitar Let's Encrypt.
+(GLPI, Zabbix web) en la red `edge`, agregales labels de Traefik, y creá sus
+CNAME. El SSL deja de necesitar Let's Encrypt.
