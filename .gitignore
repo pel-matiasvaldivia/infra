@@ -1,0 +1,14 @@
+# Node / Pulumi
+node_modules/
+bin/
+*.tsbuildinfo
+
+# Secretos y estado local — nunca commitear
+.env
+*.pem
+*.key
+id_*
+!*.example
+
+# Pulumi solo commitea Pulumi.<stack>.yaml (los secretos van cifrados).
+Pulumi.*.yaml.bak

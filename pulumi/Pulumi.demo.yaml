@@ -1,0 +1,17 @@
+# Stack de ejemplo: "demo".
+#
+# Completá accountId y zoneId con los de tu cuenta/zona de Cloudflare.
+# Los valores con `default` en Pulumi.yaml no hace falta repetirlos acá.
+#
+# Los SECRETOS no van en este archivo en texto plano; cargalos con:
+#   pulumi config set --secret cloudflare:apiToken  <token>     # o export CLOUDFLARE_API_TOKEN
+#   pulumi config set --secret itier-infra:vpsSshKey -- "$(cat ~/.ssh/id_demo)"   # solo si deployToVps=true
+#
+config:
+  itier-infra:accountId: "REEMPLAZAR_account_id_de_cloudflare"
+  itier-infra:zoneId: "REEMPLAZAR_zone_id_de_pymesenlinea.com.ar"
+  itier-infra:hostname: demo.itier.pymesenlinea.com.ar
+  itier-infra:deployToVps: "false"
+  # --- solo si deployToVps=true ---
+  # itier-infra:vpsHost: "203.0.113.10"
+  # itier-infra:vpsUser: "deploy"

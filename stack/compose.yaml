@@ -1,0 +1,71 @@
+# iTier — stack de demo en el VPS, detrás de Cloudflare Tunnel.
+#
+# Arquitectura:
+#   internet ──HTTPS──> Cloudflare (termina TLS) ──túnel──> cloudflared
+#                                                              │ http
+#                                                           Traefik ──> landing
+#
+# NO se publica ningún puerto al host: cloudflared sale hacia Cloudflare y
+# Traefik sólo es alcanzable dentro de la red `edge`. El firewall del VPS puede
+# quedar cerrado a todo lo entrante.
+#
+# Variables (ver .env.example):
+#   TUNNEL_TOKEN   token del connector (lo genera Pulumi; es secreto)
+#   LANDING_IMAGE  imagen de la landing en GHCR
+#   LANDING_HOST   hostname público (debe coincidir con el ingress del túnel)
+
+name: itier-demo
+
+x-comun: &comun
+  restart: unless-stopped
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options: { max-size: "5m", max-file: "3" }
+
+services:
+
+  # ── El connector del túnel. Única salida a internet, sin puertos entrantes ──
+  cloudflared:
+    <<: *comun
+    image: cloudflare/cloudflared:latest
+    container_name: itier-cloudflared
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?falta TUNNEL_TOKEN (lo genera Pulumi)}
+    networks: [edge]
+
+  # ── Reverse proxy interno. Rutea por labels de Docker. SIN TLS (lo hizo CF) ──
+  traefik:
+    <<: *comun
+    image: traefik:v3.3
+    container_name: itier-traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=itier-demo_edge
+      - --entrypoints.web.address=:80
+      # Panel interno opcional (no expuesto): útil para depurar el ruteo.
+      - --api.dashboard=false
+      - --log.level=INFO
+      - --accesslog=true
+    volumes:
+      # Read-only: Traefik sólo lee eventos de Docker para descubrir servicios.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [edge]
+
+  # ── La landing de iTier (sitio estático servido por nginx) ──────────────────
+  landing:
+    <<: *comun
+    image: ${LANDING_IMAGE:-ghcr.io/pel-matiasvaldivia/itier-landing:latest}
+    container_name: itier-landing
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.landing.rule=Host(`${LANDING_HOST:?falta LANDING_HOST}`)
+      - traefik.http.routers.landing.entrypoints=web
+      - traefik.http.services.landing.loadbalancer.server.port=80
+    networks: [edge]
+
+networks:
+  edge:
+    driver: bridge

@@ -1,0 +1,17 @@
+{
+  "name": "itier-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Infra de iTier: Cloudflare Tunnel + ingress + DNS con Pulumi.",
+  "main": "index.ts",
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5.4"
+  },
+  "dependencies": {
+    "@pulumi/cloudflare": "^5.49.0",
+    "@pulumi/command": "^1.0.1",
+    "@pulumi/pulumi": "^3.150.0",
+    "@pulumi/random": "^4.16.0"
+  }
+}
