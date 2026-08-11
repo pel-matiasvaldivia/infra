@@ -1,7 +1,9 @@
 # Imagen de la landing de iTier — nginx sirviendo el sitio estático.
 #
-# Va en itier/landing/Dockerfile. Contexto de build: la carpeta `landing/`.
-# La construye y publica .github/workflows/deploy-landing.yml a GHCR.
+# La construye .github/workflows/build-images.yml (en ESTE repo, infra) y la
+# publica a GHCR. El contenido HTML (index.html, manual.html) viene del repo
+# `itier`: el workflow hace checkout de itier y usa su carpeta `landing/` como
+# contexto de build, con este nginx.conf copiado adentro.
 #
 # Detrás de Cloudflare Tunnel + Traefik: escucha HTTP en :80, sin TLS
 # (Cloudflare ya terminó el TLS en el edge).

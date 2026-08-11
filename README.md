@@ -26,15 +26,21 @@ antes de mover el stack pesado de GLPI/Zabbix.
 
 ```
 infra/
-├── stack/                       Lo que corre en el VPS
-│   ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
-│   ├── .env.example
-│   └── README.md                red compartida + Public Hostname + levantar
-└── examples/itier-landing-ci/   Archivos para COPIAR al repo itier
-    ├── Dockerfile               empaqueta la landing en nginx
-    ├── nginx.conf               headers de seguridad + /healthz
-    └── deploy-landing.yml       GitHub Actions: build → GHCR → deploy por SSH
+├── .github/workflows/
+│   └── build-images.yml         Actions: construye las imágenes → GHCR
+├── images/
+│   └── landing/                 Cómo se empaqueta la landing
+│       ├── Dockerfile           nginx sirviendo el sitio estático
+│       └── nginx.conf           headers de seguridad + /healthz
+└── stack/                       Lo que corre en el VPS
+    ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
+    ├── .env.example
+    └── README.md                Public Hostname + levantar
 ```
+
+**El flujo en dos tiempos:** GitHub Actions construye las imágenes y las publica
+en GHCR → en el VPS clonás este repo y hacés `docker compose up` (baja las
+imágenes ya construidas; el VPS nunca compila).
 
 ## Cómo encaja cada pieza
 
@@ -43,8 +49,8 @@ infra/
 | Túnel + connector | **ya existe** (DW-Services) | tu VPS + dashboard |
 | Public Hostname (ingress) | dashboard del túnel | Cloudflare |
 | DNS | lo crea el dashboard al agregar el hostname | Cloudflare |
+| Imágenes docker | **GitHub Actions → GHCR** | `.github/workflows/build-images.yml` |
 | Reverse proxy + servicios | **docker compose** | `stack/compose.yaml` |
-| Imagen de la landing | **GitHub Actions → GHCR** | `examples/` → repo `itier` |
 | SSL público | **Cloudflare** (Universal SSL) | nada que instalar |
 
 El punto de integración es la red de docker del túnel (**`tunnel_default`**, que ya
@@ -53,68 +59,60 @@ lo alcanza por su nombre de contenedor.
 
 ---
 
-## Puesta en marcha del demo
+## Parte 1 — Construir las imágenes (GitHub Actions)
 
-### Requisitos previos
-- El túnel DW-Services activo (ya lo tenés) con su `cloudflared` corriendo como
-  contenedor en el VPS.
-- El repo `infra` clonado en el VPS (o al menos la carpeta `stack/`).
+El workflow **`.github/workflows/build-images.yml`** construye las imágenes de la
+infra y las publica en GHCR. Hoy hay una: la landing. Como su HTML vive en el repo
+`itier`, el workflow hace checkout de `itier` y construye desde su carpeta
+`landing/` con el `Dockerfile` de este repo.
 
-### Paso 1 — Publicar la imagen de la landing (en el repo `itier`)
+Se dispara solo al pushear cambios en `images/**` a `main`, o a mano desde la
+pestaña **Actions → build-images → Run workflow**. Publica
+`ghcr.io/pel-matiasvaldivia/itier-landing:latest`.
 
-Copiá los tres archivos de `examples/itier-landing-ci/` al repo `itier`:
+> **Hacé público el paquete** `itier-landing` (o dale acceso de lectura al VPS),
+> así el `docker pull` del VPS funciona sin login. Si lo dejás privado, en el VPS
+> hacé `docker login ghcr.io` con un PAT de lectura de packages.
 
-```sh
-cp examples/itier-landing-ci/Dockerfile   <itier>/landing/Dockerfile
-cp examples/itier-landing-ci/nginx.conf   <itier>/landing/nginx.conf
-cp examples/itier-landing-ci/deploy-landing.yml \
-   <itier>/.github/workflows/deploy-landing.yml
-```
+Para reconstruir tras editar la landing en `itier`, corré el workflow a mano
+(la fuente está en otro repo, así que un push a `infra` no se entera). Opcional:
+en `itier` podés agregar un workflow que dispare este por `repository_dispatch`.
 
-Commiteá y pusheá a `main`. GitHub Actions publica
-`ghcr.io/pel-matiasvaldivia/itier-landing:latest`. Marcá el paquete como
-**público** (o dale acceso al VPS) para que el `docker pull` funcione.
+## Parte 2 — Desplegar en el VPS (clonar + compose up)
 
-> La imagen se puede probar sin nada de Cloudflare:
-> `docker build -t itier-landing landing/ && docker run --rm -p 8080:80 itier-landing`
-
-### Paso 2 — Agregar el Public Hostname en el túnel
+### Paso 1 — Public Hostname en el túnel
 
 En Cloudflare → Networks → Tunnels → **DW-Services** → Published application routes,
 agregá: `demo.itier.pymesenlinea.com.ar` → Service `HTTP` `itier-traefik:80`.
 El DNS lo crea el dashboard solo.
 
-### Paso 3 — Levantar el stack
+### Paso 2 — Clonar el repo y levantar
+
+En el VPS:
 
 ```sh
-cd stack
-cp .env.example .env          # LANDING_HOST = el hostname del paso 2
+git clone https://github.com/pel-matiasvaldivia/infra
+cd infra/stack
+cp .env.example .env          # LANDING_HOST = el hostname del paso 1
 docker compose up -d
 ```
 
 Traefik se engancha a `tunnel_default` (ya existe), así que el `cloudflared-tunnel`
 lo ve de inmediato. No hay que crear ninguna red.
 
-### Paso 4 — Verificar
+### Paso 3 — Verificar
 
 ```sh
 curl -I https://demo.itier.pymesenlinea.com.ar        # HTTP/2 200
 ```
 
-En el VPS, `docker compose ps` muestra `traefik` y `landing` arriba y **ningún
-puerto publicado**.
+`docker compose ps` muestra `traefik` y `landing` arriba y **ningún puerto publicado**.
 
----
+## Actualizar
 
-## Despliegue continuo
-
-Cada push a `main` en `itier` que toque `landing/`:
-
-1. GitHub Actions construye la imagen y la publica en GHCR.
-2. Si cargaste los secrets `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` en el repo,
-   el mismo workflow entra por SSH y hace `docker compose pull && up -d landing`.
-
-El VPS nunca compila: solo baja imágenes ya construidas.
+- **Nueva versión de una imagen:** corré el workflow (o pusheá a `images/**`) →
+  en el VPS: `cd infra/stack && docker compose pull && docker compose up -d`.
+- **Cambió el compose/config:** en el VPS `git pull` y `docker compose up -d`.
 
 ## Migrar el stack real (GLPI/Zabbix)
 
