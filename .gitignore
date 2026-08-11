@@ -1,0 +1,6 @@
+# Secretos y estado local — nunca commitear
+.env
+*.pem
+*.key
+id_*
+!*.example

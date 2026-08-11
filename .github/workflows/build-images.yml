@@ -1,0 +1,93 @@
+name: build-images
+
+# Construye las imágenes docker de la infra y las publica en GHCR.
+#
+# Hoy hay una imagen: la landing. Su HTML vive en el repo `itier`, así que el
+# workflow hace checkout de itier y construye desde su carpeta `landing/` usando
+# el Dockerfile de este repo (images/landing/Dockerfile).
+#
+# Como la fuente de la landing está en OTRO repo, un push a `infra` no se entera
+# de cambios en itier: para reconstruir tras editar la landing, corré este
+# workflow a mano (pestaña Actions → Run workflow) o desde itier con un
+# repository_dispatch (ver README).
+#
+# Despliegue: manual. En el VPS se clona este repo y se hace `docker compose up`
+# (baja las imágenes de GHCR). Ver README.
+
+on:
+  push:
+    branches: ['main', 'master']
+    paths:
+      - 'images/**'
+      - '.github/workflows/build-images.yml'
+  pull_request:
+    paths:
+      - 'images/**'
+      - '.github/workflows/build-images.yml'
+  workflow_dispatch:
+  # Permite disparar el build desde el repo itier cuando cambia la landing:
+  #   en itier, un workflow hace un repository_dispatch con type "landing-changed".
+  repository_dispatch:
+    types: [landing-changed]
+
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LANDING_IMAGE: ghcr.io/${{ github.repository_owner }}/itier-landing
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  landing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout infra (Dockerfile + nginx.conf)
+        uses: actions/checkout@v4
+
+      - name: Checkout itier (fuente de la landing)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/itier
+          path: itier-src
+
+      # El contexto de build es la carpeta landing/ de itier; le sumamos el
+      # nginx.conf de este repo para que el COPY del Dockerfile lo encuentre.
+      - name: Preparar el contexto
+        run: cp images/landing/nginx.conf itier-src/landing/nginx.conf
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login a GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Etiquetas y metadatos
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.LANDING_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Construir (y publicar si no es PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: itier-src/landing
+          file: images/landing/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
