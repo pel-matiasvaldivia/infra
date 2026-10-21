@@ -1,0 +1,61 @@
+# Stack BASE de cada VPS: el túnel + el reverse proxy. Es lo ÚNICO fijo del
+# servidor; los servicios de cada proyecto NO van acá (los despliega el pipeline
+# de cada repo, ver ../README.md y ../template/).
+#
+# Se corre IGUAL en los dos VPS, cada uno con su propio túnel:
+#   - VPS de deployments (staging)  → su token de túnel
+#   - VPS de Azure (producción)     → su token de túnel
+#
+# Flujo:
+#   internet ──HTTPS──> Cloudflare (termina TLS)
+#     dominios...  (cada uno = un Public Hostname del túnel → http://traefik:80)
+#        └──túnel saliente──> cloudflared ──red `edge`──> Traefik ──> servicios
+#
+# La red `edge` la crea ESTE compose y es COMPARTIDA: cada proyecto se engancha
+# a ella (como external) y Traefik lo descubre por los labels de Docker.
+# NO se publica ningún puerto: todo entra por el túnel.
+
+name: base
+
+x-comun: &comun
+  restart: unless-stopped
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options: { max-size: "5m", max-file: "3" }
+
+services:
+
+  # ── Connector del túnel (gestionado desde el dashboard, con token) ──────────
+  cloudflared:
+    <<: *comun
+    image: cloudflare/cloudflared:2025.2.1
+    container_name: cloudflared
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?falta TUNNEL_TOKEN}
+    networks: [edge]
+
+  # ── Reverse proxy. Rutea por Host con los labels de cada servicio. SIN TLS ──
+  # cloudflared lo alcanza como `traefik:80` dentro de `edge`.
+  traefik:
+    <<: *comun
+    image: traefik:v3.3
+    container_name: traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=edge
+      - --entrypoints.web.address=:80
+      - --api.dashboard=false
+      - --log.level=INFO
+      - --accesslog=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [edge]
+
+# Red compartida del servidor. La crea este stack; los proyectos la referencian
+# como `external: true, name: edge`. Un único `edge` por VPS.
+networks:
+  edge:
+    name: edge

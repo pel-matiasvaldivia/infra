@@ -1,0 +1,107 @@
+# Pipeline reutilizable de build + deploy. Vive acá (infra) y lo invocan TODOS
+# los proyectos con pocas líneas (ver ../template/.github/workflows/deploy.yml).
+#
+# Modelo por ramas:
+#   push a `staging` → imagen :staging → deploy en el VPS de deployments (runner `staging`)
+#   push a `main`    → imagen :prod    → deploy en el VPS de Azure        (runner `prod`)
+#
+# El deploy corre en un self-hosted runner DENTRO del VPS (sin SSH, sin puertos
+# abiertos): clona el repo del proyecto y hace `docker compose up -d` usando su
+# deploy/compose.yaml, que engancha el servicio a la red `edge` del stack base.
+
+name: deploy-reusable
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Nombre del servicio (define la imagen GHCR y el proyecto compose)"
+        required: true
+        type: string
+      staging_host:
+        description: "Host público en staging (debe coincidir con el Public Hostname del túnel de deployments)"
+        required: true
+        type: string
+      prod_host:
+        description: "Host público en producción (Public Hostname del túnel de Azure)"
+        required: true
+        type: string
+      port:
+        description: "Puerto interno del contenedor donde escucha la app"
+        type: number
+        default: 80
+      dockerfile:
+        type: string
+        default: Dockerfile
+      context:
+        type: string
+        default: "."
+
+jobs:
+  # ── Decide entorno/host/runner según la rama ────────────────────────────────
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.pick.outputs.env }}
+      runner: ${{ steps.pick.outputs.runner }}
+      host: ${{ steps.pick.outputs.host }}
+    steps:
+      - id: pick
+        env:
+          REF: ${{ github.ref_name }}
+          STAGING_HOST: ${{ inputs.staging_host }}
+          PROD_HOST: ${{ inputs.prod_host }}
+        run: |
+          case "$REF" in
+            staging) ENV=staging;    RUNNER=staging; HOST="$STAGING_HOST" ;;
+            main)    ENV=production; RUNNER=prod;    HOST="$PROD_HOST" ;;
+            *) echo "::error::La rama '$REF' no despliega (solo staging y main)"; exit 1 ;;
+          esac
+          { echo "env=$ENV"; echo "runner=$RUNNER"; echo "host=$HOST"; } >> "$GITHUB_OUTPUT"
+
+  # ── Construye la imagen y la publica en GHCR (runner de GitHub) ─────────────
+  build:
+    needs: config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ inputs.service }}:${{ needs.config.outputs.env }}
+            ghcr.io/${{ github.repository_owner }}/${{ inputs.service }}:${{ github.sha }}
+
+  # ── Despliega en el VPS correspondiente (self-hosted runner) ────────────────
+  deploy:
+    needs: [config, build]
+    runs-on: [self-hosted, "${{ needs.config.outputs.runner }}"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: docker compose up
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ inputs.service }}:${{ github.sha }}
+          HOST: ${{ needs.config.outputs.host }}
+          PORT: ${{ inputs.port }}
+          # Proyecto y router únicos por servicio+entorno: evita choques en el VPS.
+          COMPOSE_PROJECT_NAME: ${{ inputs.service }}-${{ needs.config.outputs.env }}
+          ROUTER: ${{ inputs.service }}-${{ needs.config.outputs.env }}
+        run: |
+          docker compose -f deploy/compose.yaml pull
+          docker compose -f deploy/compose.yaml up -d
+          docker image prune -f
