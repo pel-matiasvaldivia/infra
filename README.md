@@ -32,11 +32,58 @@ infra/
 │   └── landing/                 Cómo se empaqueta la landing
 │       ├── Dockerfile           nginx sirviendo el sitio estático
 │       └── nginx.conf           headers de seguridad + /healthz
-└── stack/                       Lo que corre en el VPS
-    ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
-    ├── .env.example
-    └── README.md                Public Hostname + levantar
+├── stack/                       Demo iTier: reusa el túnel DW-Services existente
+│   ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
+│   ├── .env.example
+│   └── README.md                Public Hostname + levantar
+├── base/                        Stack base de cada VPS (túnel + Traefik + red `edge`)
+│   ├── compose.yaml             cloudflared + traefik (idéntico en staging y prod)
+│   ├── .env.example
+│   └── README.md                levantar + instalar el self-hosted runner
+└── template/                    Plantilla para cada proyecto desplegable
+    ├── .github/workflows/deploy.yml   llama al pipeline reutilizable
+    ├── deploy/compose.yaml            cómo corre el servicio (se engancha a `edge`)
+    ├── Dockerfile
+    └── README.md
 ```
+
+## Dos escenarios
+
+- **`stack/`** — la demo de iTier. Reusa el túnel **DW-Services** que ya existe
+  en el VPS viejo; no levanta `cloudflared`, solo engancha Traefik a la red
+  `tunnel_default` de ese túnel.
+- **`base/` + `template/`** — el pipeline productivo: dos VPS (deployments y
+  Azure), cada uno con su stack base, y cada proyecto se despliega solo por
+  ramas. Ver abajo.
+
+## Pipeline multi-proyecto (staging → producción)
+
+Objetivo: que **cada repo** se despliegue solo, a *staging* mientras se prueba y
+a *producción* cuando está listo, sin tocar los VPS a mano.
+
+```
+push a `staging` ─► build imagen → GHCR ─► deploy en VPS deployments (runner `staging`)
+push a `main`    ─► build imagen → GHCR ─► deploy en VPS Azure        (runner `prod`)
+```
+
+Piezas:
+
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| Stack base | `base/` en cada VPS | túnel `cloudflared` + Traefik + red `edge` |
+| Self-hosted runner | en cada VPS | ejecuta el deploy localmente (sin SSH ni puertos) |
+| Pipeline reutilizable | `.github/workflows/deploy-reusable.yml` | build → GHCR → deploy, un solo lugar que mantener |
+| Plantilla de proyecto | `template/` | cada repo la copia; su `deploy.yml` llama al pipeline |
+
+Puesta en marcha: levantar `base/` e instalar el runner en los dos VPS
+(ver [`base/README.md`](base/README.md)); después, cada proyecto nuevo copia
+`template/` y edita 3 valores (ver [`template/README.md`](template/README.md)).
+
+> **Para que aplique a *todos* tus repos** sin registrar runners uno por uno, lo
+> ideal es tener los repos en una **organización** de GitHub (gratis): ahí los
+> runners y el pipeline se comparten. En cuenta personal funciona igual, pero los
+> runners son por repositorio. Automatizar el alta al *crear* un repo requiere
+> una GitHub App que escuche `repository.created` — opcional, lo vemos si querés.
 
 **El flujo en dos tiempos:** GitHub Actions construye las imágenes y las publica
 en GHCR → en el VPS clonás este repo y hacés `docker compose up` (baja las

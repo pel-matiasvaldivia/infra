@@ -1,0 +1,28 @@
+# Cómo corre ESTE servicio en el VPS. El pipeline lo usa con:
+#   IMAGE, HOST, PORT, ROUTER, COMPOSE_PROJECT_NAME  (los inyecta el workflow)
+#
+# No publica puertos: se engancha a la red `edge` (la del stack base) y Traefik
+# lo descubre por los labels. No necesita cambios salvo que agregues volúmenes,
+# variables de entorno o servicios extra (una base de datos, por ejemplo).
+
+services:
+  app:
+    image: ${IMAGE:?falta IMAGE}
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${ROUTER:-app}.rule=Host(`${HOST:?falta HOST}`)
+      - traefik.http.routers.${ROUTER:-app}.entrypoints=web
+      - traefik.http.services.${ROUTER:-app}.loadbalancer.server.port=${PORT:-80}
+    networks: [edge]
+
+# Red compartida del VPS, creada por el stack base (infra/base). Externa: acá
+# solo nos enganchamos a ella.
+networks:
+  edge:
+    external: true
+    name: edge

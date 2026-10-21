@@ -1,0 +1,24 @@
+# Pipeline del proyecto. Delega TODO en el workflow reutilizable de `infra`.
+# Lo único que editás acá es el bloque `with:` (nombre y dominios del servicio).
+#
+#   push a `staging` → deploy a staging (VPS deployments)
+#   push a `main`    → deploy a producción (VPS Azure)
+
+name: deploy
+
+on:
+  push:
+    branches: [staging, main]
+
+jobs:
+  deploy:
+    uses: pel-matiasvaldivia/infra/.github/workflows/deploy-reusable.yml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      service: mi-servicio                               # ← nombre del proyecto
+      staging_host: mi-servicio.staging.pymesenlinea.com.ar
+      prod_host: mi-servicio.pymesenlinea.com.ar
+      port: 80                                           # ← puerto interno del contenedor
+    secrets: inherit
