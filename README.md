@@ -32,11 +32,25 @@ infra/
 │   └── landing/                 Cómo se empaqueta la landing
 │       ├── Dockerfile           nginx sirviendo el sitio estático
 │       └── nginx.conf           headers de seguridad + /healthz
-└── stack/                       Lo que corre en el VPS
-    ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
+├── stack/                       Demo iTier: reusa el túnel DW-Services existente
+│   ├── compose.yaml             traefik + landing (sin cloudflared, sin puertos)
+│   ├── .env.example
+│   └── README.md                Public Hostname + levantar
+└── prod/                        Producción multi-servicio en el VPS de Azure
+    ├── compose.yaml             cloudflared (túnel nuevo) + traefik + N servicios
     ├── .env.example
-    └── README.md                Public Hostname + levantar
+    └── README.md                alta de túnel + 3 pasos por dominio
 ```
+
+## Dos escenarios
+
+- **`stack/`** — la demo de iTier. Reusa el túnel **DW-Services** que ya existe
+  en el VPS viejo; no levanta `cloudflared`, solo engancha Traefik a la red
+  `tunnel_default` de ese túnel.
+- **`prod/`** — el VPS **nuevo de Azure** como servidor productivo. Lleva su
+  propio `cloudflared` (túnel dedicado, p. ej. `azure-prod`) + Traefik, y sirve
+  **varios dominios** a la vez: cada Public Hostname apunta al mismo `traefik:80`
+  y Traefik rutea por `Host`. Ver **[`prod/README.md`](prod/README.md)**.
 
 **El flujo en dos tiempos:** GitHub Actions construye las imágenes y las publica
 en GHCR → en el VPS clonás este repo y hacés `docker compose up` (baja las
